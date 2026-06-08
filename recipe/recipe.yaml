@@ -1,15 +1,15 @@
 schema_version: 1
 
 context:
-  version: "26.0.3"
+  version: "26.1.2"
 
-package:
+recipe:
   name: mesalib
   version: ${{ version }}
 
 source:
   url: https://archive.mesa3d.org/mesa-${{ version }}.tar.xz
-  sha256: ddb7443d328e89aa45b4b6b80f077bf937f099daeca8ba48cabe32aab769e134
+  sha256: bac2bca9121897a2b8162e79636b50ac998fca799c8e6cf914edd85962babdf0
   patches:
     - if: win
       then:
@@ -18,88 +18,167 @@ source:
 build:
   number: 0
 
-requirements:
-  build:
-    - ${{ compiler('c') }}
-    - ${{ stdlib('c') }}
-    - ${{ compiler('cxx') }}
-    - meson
-    - pyyaml
-    - mako
-    - packaging
-    - if: unix
-      then:
-        - flex
-        - bison
-    - if: win
-      then: winflexbison
-    - pkg-config
-    - if: build_platform != target_platform
-      then:
+outputs:
+  # Build mesa once in a shared staging output, then split the installed tree
+  # between multiple package outputs with per-output `files:` globs (no overlap).
+  - staging:
+      name: mesalib-build
+    requirements:
+      build:
+        - ${{ compiler('c') }}
+        - ${{ stdlib('c') }}
+        - ${{ compiler('cxx') }}
+        - meson
+        - pyyaml
+        - mako
+        - packaging
+        - if: unix
+          then:
+            - flex
+            - bison
+        - if: win
+          then: winflexbison
+        - pkg-config
+        - if: build_platform != target_platform
+          then:
+            - llvm
+            - llvmdev
+            - if: linux
+              then: libdrm
+        - glslang
+      host:
+        - if: unix
+          then: expat
+        - zlib
+        - zstd
+        - if: linux
+          then: libdrm
+        - spirv-tools
         - llvm
         - llvmdev
         - if: linux
-          then: libdrm
-    - glslang
-  host:
-    - if: unix
-      then: expat
-    - zlib
-    - zstd
-    - if: linux
-      then: libdrm
-    - spirv-tools
-    - llvm
-    - llvmdev
-    - if: linux
-      then:
-        - libxcb
-        - xorg-libx11
-        - xorg-xorgproto
-        - xorg-libxrandr
-        - xorg-libxshmfence
-    - if: win
-      then:
-        - libxml2-devel
-  run_exports:
-    - ${{ pin_subpackage('mesalib', upper_bound='x.x') }}
+          then:
+            - libxcb
+            - xorg-libx11
+            - xorg-xorgproto
+            - xorg-libxrandr
+            - xorg-libxshmfence
+            - xorg-libxext
+            # glvnd headers (include/glvnd/*.h) + libglvnd.pc, required by
+            # -Dglvnd=enabled. Its run_export pulls libglvnd (libGLdispatch)
+            # which the libGLX_mesa/libEGL_mesa vendor libs need at runtime.
+            - libglvnd-devel
+        - if: win
+          then:
+            - libxml2-devel
+    build:
+      script:
+        - if: win
+          then: build.bat
+          else: build.sh
 
-tests:
-  - requirements:
-      run:
-        - pkg-config
-    script:
-      - if: linux
-        then:
-          - test ! -f $PREFIX/lib/dri/kms_swrast_dri${SHLIB_EXT}
-          - test ! -f $PREFIX/lib/dri/swrast_dri${SHLIB_EXT}
-          - test ! -f $PREFIX/lib/libgbm${SHLIB_EXT}
-          - test ! -f $PREFIX/lib/libGLESv1_CM${SHLIB_EXT}
-          - test ! -f $PREFIX/lib/libGLESv2${SHLIB_EXT}
-          - test ! -f $PREFIX/lib/libEGL${SHLIB_EXT}
-          - test ! -f $PREFIX/lib/libGL${SHLIB_EXT}
-      - if: unix
-        then:
-          - test -f $PREFIX/lib/libvulkan_lvp${SHLIB_EXT}
-          - if: x86_64
+  # Primary historic package: vulkan lavapipe ICD + GL/EGL headers.
+  # Everything EXCEPT the DRI software-driver deliverables that now live in
+  # the mesa-dri-drivers output.
+  - package:
+      name: mesalib
+    inherit: mesalib-build
+    requirements:
+      run_exports:
+        - ${{ pin_subpackage('mesalib', upper_bound='x.x') }}
+    build:
+      files:
+        include:
+          - lib/libvulkan_lvp.*
+          - share/vulkan/**
+          - bin/**
+          # With -Dglvnd=enabled (linux) mesa no longer installs the GL/EGL/KHR
+          # public headers (mesa's include/meson.build guards them behind
+          # `not with_glvnd`); on conda-forge those are provided by
+          # libgl-devel / libegl-devel. The only headers mesa still ships under
+          # glvnd are the non-upstream EGL angle/mesa extension headers
+          # (EGL/eglext_angle.h, EGL/eglmesaext.h), matched by include/EGL/**.
+          - include/EGL/**
+          - share/drirc.d/**
+          # windows artifacts
+          - Library/lib/vulkan_lvp.lib
+          - Library/bin/vulkan_lvp.dll
+          - Library/share/vulkan/**
+    tests:
+      - requirements:
+          run:
+            - pkg-config
+        script:
+          - if: unix
             then:
-              - test -f $PREFIX/share/vulkan/icd.d/lvp_icd.x86_64.json
-      - if: aarch64
-        then:
-          - test -f $PREFIX/share/vulkan/icd.d/lvp_icd.aarch64.json
-      - if: ppc64le
-        then:
-          - test -f $PREFIX/share/vulkan/icd.d/lvp_icd.ppc64le.json
-      - if: osx
-        then:
-          - test ! -f $PREFIX/lib/libGLESv1_CM.1${SHLIB_EXT}
-          - test ! -f $PREFIX/lib/libGLESv2.2${SHLIB_EXT}
-          - test ! -f $PREFIX/lib/libGL.1${SHLIB_EXT}
-      - if: win
-        then:
-          - if not exist %LIBRARY_PREFIX%\lib\vulkan_lvp.lib exit 1
-          - if not exist %LIBRARY_PREFIX%\bin\vulkan_lvp.dll exit 1
-          - if not exist %LIBRARY_PREFIX%\share\vulkan\icd.d\lvp_icd.x86_64.json exit 1
+              - test -f $PREFIX/lib/libvulkan_lvp${SHLIB_EXT}
+              - if: x86_64
+                then:
+                  - test -f $PREFIX/share/vulkan/icd.d/lvp_icd.x86_64.json
+          - if: aarch64
+            then:
+              - test -f $PREFIX/share/vulkan/icd.d/lvp_icd.aarch64.json
+          - if: ppc64le
+            then:
+              - test -f $PREFIX/share/vulkan/icd.d/lvp_icd.ppc64le.json
+          - if: win
+            then:
+              - if not exist %LIBRARY_PREFIX%\lib\vulkan_lvp.lib exit 1
+              - if not exist %LIBRARY_PREFIX%\bin\vulkan_lvp.dll exit 1
+              - if not exist %LIBRARY_PREFIX%\share\vulkan\icd.d\lvp_icd.x86_64.json exit 1
+
+  # New output: Mesa software DRI driver + DRI loader header.
+  # Ships the gallium software DRI megadriver/loader stub (swrast_dri.so,
+  # kms_swrast_dri.so), the DRI loader interface header, dri.pc, and the
+  # GL/EGL/GBM client libraries produced alongside it. Built only on linux
+  # where the DRI software frontend is enabled.
+  - package:
+      name: mesa-dri-drivers
+    inherit: mesalib-build
+    build:
+      skip:
+        - not linux
+      files:
+        include:
+          # gallium software DRI megadriver/loader + gbm backend
+          - lib/dri/**
+          - lib/gbm/**
+          - lib/libgallium-*.so*
+          - lib/libgbm.so*
+          # libglvnd VENDOR libraries built by -Dglvnd=enabled (NOT libGL/libEGL,
+          # which conda-forge's libglvnd provides). These need libGLdispatch from
+          # libglvnd at runtime.
+          - lib/libGLX_mesa.so*
+          - lib/libEGL_mesa.so*
+          - share/glvnd/egl_vendor.d/50_mesa.json
+          # DRI loader interface header + pkg-config files for dri/gbm
+          - include/GL/internal/**
+          - lib/pkgconfig/dri.pc
+          - lib/pkgconfig/gbm.pc
+    requirements:
+      run:
+        - ${{ pin_subpackage('mesalib', upper_bound='x.x') }}
+        # libGLdispatch (libglvnd) is needed at runtime by the
+        # libGLX_mesa/libEGL_mesa vendor libraries.
+        - libglvnd
+      run_exports:
+        - ${{ pin_subpackage('mesa-dri-drivers', upper_bound='x.x') }}
+    tests:
+      - requirements:
+          run:
+            - pkg-config
+        script:
+          # DRI software driver deliverables
+          - test -f $PREFIX/lib/dri/swrast_dri${SHLIB_EXT}
+          - test -f $PREFIX/include/GL/internal/dri_interface.h
+          - test -f $PREFIX/lib/pkgconfig/dri.pc
+          - pkg-config --variable=dridriverdir dri
+          # libglvnd vendor libs + EGL vendor ICD are present
+          - test -f $PREFIX/lib/libGLX_mesa.so.0
+          - test -f $PREFIX/share/glvnd/egl_vendor.d/50_mesa.json
+          # ...and the glvnd-conflicting libGL/libEGL are NOT shipped
+          - test ! -f $PREFIX/lib/libGL.so.1
+          - test ! -f $PREFIX/lib/libEGL.so.1
 
 about:
   homepage: https://www.mesa3d.org

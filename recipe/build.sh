@@ -34,17 +34,43 @@ if [[ $CONDA_BUILD_CROSS_COMPILATION == "1" ]]; then
   fi
 fi
 
+# On Linux, enable the software DRI frontend so that the gallium software
+# DRI driver (lib/dri/swrast_dri.so via the dril loader stub), the DRI loader
+# header (include/GL/internal/dri_interface.h) and dri.pc get built/installed.
+# Enabling glx=dri (and egl/gbm) makes `with_dri` true in mesa's meson logic
+# (it requires with_gallium && system_has_kms_drm, which holds on linux).
+# glvnd is ENABLED so that mesa builds the libglvnd vendor libraries
+# (libGLX_mesa.so.0 / libEGL_mesa.so.0 + share/glvnd/egl_vendor.d/50_mesa.json)
+# and does NOT ship its own libGL.so / libEGL.so (those collide with
+# conda-forge's libglvnd, which provides libGL/libEGL). With glvnd enabled mesa
+# also stops installing the GL/EGL/KHR public headers (libgl-devel/libegl-devel
+# ship those on conda-forge). swrast_dri.so / dri_interface.h / dri.pc / libgbm
+# / libgallium are still built.
+# On macOS/Windows we keep the DRI frontend disabled (no kms/drm there).
+if [[ "${target_platform}" == linux-* ]]; then
+  MESA_DRI_ARGS=(
+    -Dglx=dri
+    -Degl=enabled
+    -Dgbm=enabled
+    -Dglvnd=enabled
+  )
+else
+  MESA_DRI_ARGS=(
+    -Degl=disabled
+    -Dglx=disabled
+    -Dgbm=disabled
+  )
+fi
+
 meson setup builddir/ \
   ${MESON_ARGS} \
   -Dplatforms=${MESA_PLATFORMS} \
   -Dgles1=disabled \
   -Dgles2=disabled \
   -Dgallium-va=disabled \
-  -Dgbm=disabled \
   -Dshared-glapi=enabled \
   -Dgallium-drivers=softpipe,llvmpipe \
-  -Degl=disabled \
-  -Dglx=disabled \
+  "${MESA_DRI_ARGS[@]}" \
   -Dllvm=enabled \
   -Dshared-llvm=enabled \
   -Dlibdir=lib \
